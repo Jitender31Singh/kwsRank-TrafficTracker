@@ -396,7 +396,7 @@ def build_page_df(df_page_sheet, df_gsc_page, end_date):
 def update_kw_sheet(sheet_name, df_query, formatted_date):
     logger.info(f"Updating sheet: {sheet_name}")
 
-    df = pd.read_excel(LOCAL_FILE, sheet_name=sheet_name, header=[0, 1])
+    df = pd.read_excel(LOCAL_FILE, sheet_name=sheet_name, header=[0])
     df = fix_multiindex_columns(df)
 
     primary_col = get_column(df, "primary")
@@ -554,10 +554,14 @@ def main():
     try:
         client = GraphAPIClient()
 
+        # Step 0: Delete existing file
+        if os.path.exists(LOCAL_FILE):
+            os.remove(LOCAL_FILE)
+            logger.info("Old local file removed")
+    
+
         # Step 1: Download full file
         download_file(client)
-
-        # workbook = load_workbook(LOCAL_FILE)
 
         # Step 2: GSC
         service = get_gsc_service()
@@ -566,8 +570,8 @@ def main():
         start_date = end_date - timedelta(days=6)
         formatted_date = end_date.strftime("%d %B")
 
-        df_query = fetch_data(service, start_date, end_date,["query"])
-        df_page = fetch_data(service,start_date,end_date,["page"])
+        df_query = fetch_data(service, start_date, end_date, ["query"])
+        df_page = fetch_data(service, start_date, end_date, ["page"])
 
         logger.info("pages %s", df_page)
 
@@ -588,16 +592,47 @@ def main():
         for sheet in sheets_to_update:
             
             if sheet == 'demoSheet':
-                update_kw_sheet( sheet, df_query, formatted_date)
+                update_kw_sheet(sheet, df_query, formatted_date)
             elif sheet == "Page sheet":
                 update_page_sheet(sheet,df_page,formatted_date)
             else:
                 update_country_sheet(sheet,start_date,end_date,formatted_date)
 
-        # Step 3: Upload back
-        # upload_file(client)
+        # =========================
+        # 🚀 Step 3: Upload with Retry
+        # =========================
+        MAX_RETRIES = 3
+        upload_success = False
 
-        logger.info("Pipeline completed successfully ✅")
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                logger.info(f"Upload attempt {attempt}...")
+                upload_file(client)
+                upload_success = True
+                logger.info("Upload successful ✅")
+                break
+
+            except Exception as e:
+                logger.warning(f"Upload attempt {attempt} failed: {str(e)}")
+
+                if "locked" in str(e).lower():
+                    logger.warning("File is locked on SharePoint. Retrying in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    # Non-retryable error → break immediately
+                    break
+
+        # =========================
+        # 🧹 Step 4: Delete ONLY if upload succeeded
+        # =========================
+        if upload_success:
+            if os.path.exists(LOCAL_FILE):
+                os.remove(LOCAL_FILE)
+                logger.info("Local temp file deleted 🧹")
+        else:
+            logger.error("Upload failed after retries. Keeping local file for debugging ⚠️")
+
+        logger.info("Pipeline completed successfully ✅" if upload_success else "Pipeline completed with errors ⚠️")
 
     except Exception as e:
         logger.exception(f"Pipeline failed: {str(e)}")
