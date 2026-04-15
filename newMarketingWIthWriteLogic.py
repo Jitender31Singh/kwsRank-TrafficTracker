@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import io
@@ -36,7 +37,7 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
 SITE_ID = os.getenv("SITE_ID")
 DRIVE_ID = os.getenv("DRIVE_ID")
-FILE_ID = os.getenv("FILE_ID")
+FILE_ID = os.getenv("COMBINED_FILE_ID")
 
 SITE_URL = os.getenv("GSC_SITE_URL")
 KEY_FILE = os.getenv("GSC_KEY_FILE")
@@ -92,29 +93,80 @@ class GraphAPIClient:
 # =========================
 # 📂 DOWNLOAD FULL FILE
 # =========================
-def download_file(client):
+# def download_file(client, local_file=LOCAL_FILE,file_id=FILE_ID):
+#     logger.info("Downloading full Excel file from SharePoint...")
+
+#     url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/items/{file_id}/content"
+#     response = requests.get(url, headers=client.get_headers())
+
+#     if response.status_code != 200:
+#         raise Exception(response.text)
+
+#     with open(local_file, "wb") as f:
+#         f.write(response.content)
+
+#     logger.info("File downloaded successfully")
+
+def download_file(client, local_file=LOCAL_FILE, file_id=FILE_ID):
     logger.info("Downloading full Excel file from SharePoint...")
+    logger.info("Using FILE_ID: %s", file_id)
+    logger.info("Using LOCAL_FILE: %s", local_file)
 
-    url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-    response = requests.get(url, headers=client.get_headers())
+    url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/items/{file_id}/content"
+    
+    
+    response = requests.get(url, headers=client.get_headers(), allow_redirects=False)
 
-    if response.status_code != 200:
-        raise Exception(response.text)
+    # logger.info("Download status code: %s", response.status_code)
+    # logger.info("Download headers: %s", dict(response.headers))
+    # logger.info("Download response text: %s", response.text[:500])
 
-    with open(LOCAL_FILE, "wb") as f:
-        f.write(response.content)
+    if response.status_code == 200:
+        with open(local_file, "wb") as f:
+            f.write(response.content)
+        logger.info("File downloaded successfully")
+        return
 
-    logger.info("File downloaded successfully")
+    # Handle Graph redirect to actual file URL
+    if response.status_code in (301, 302, 303, 307, 308):
+        download_url = response.headers.get("Location")
+        if not download_url:
+            raise Exception(f"Redirect received but no Location header. Status={response.status_code}")
+
+        logger.info("Following redirect to actual download URL...")
+
+        # IMPORTANT: redirected URL usually should be called WITHOUT auth header
+        file_response = requests.get(download_url, stream=True)
+
+        logger.info("Redirected download status code: %s", file_response.status_code)
+
+        if file_response.status_code != 200:
+            raise Exception(
+                f"Redirected download failed. "
+                f"Status={file_response.status_code}, Body={file_response.text[:500]}"
+            )
+
+        with open(local_file, "wb") as f:
+            for chunk in file_response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+        logger.info("File downloaded successfully after redirect")
+        return
+
+    raise Exception(
+        f"Download failed. Status={response.status_code}, Body={response.text[:500]}"
+    )
 
 # =========================
 # 📤 UPLOAD FILE
 # =========================
-def upload_file(client):
+def upload_file(client, local_file=LOCAL_FILE,file_id=FILE_ID):
     logger.info("Uploading updated file to SharePoint...")
 
-    url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+    url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DRIVE_ID}/items/{file_id}/content"
 
-    with open(LOCAL_FILE, "rb") as f:
+    with open(local_file, "rb") as f:
         data = f.read()
 
     headers = client.get_headers()
@@ -226,7 +278,7 @@ def fetch_page_data_by_country(service, site_url, start_date, end_date, country_
             all_rows.append({
                 "page": row["keys"][0],
                 "clicks": row.get("clicks", 0),
-                "position": row.get("position", 0)
+                "position": math.ceil(float(row.get("position") or 0))
             })
 
         logger.info(f"Fetched {len(rows)} page rows at startRow={start_row}")
@@ -310,7 +362,7 @@ def fetch_keyword_data_by_country(service, site_url, start_date, end_date, count
                 "clicks": row.get("clicks", 0),
                 # "impressions": row.get("impressions", 0),
                 # "ctr": row.get("ctr", 0),
-                "position": row.get("position", 0)
+                "position": math.ceil(float(row.get("position") or 0))           
             })
 
         logger.info(f"Fetched {len(rows)} rows at startRow={start_row}")
@@ -351,7 +403,7 @@ def fetch_data(service, start_date, end_date, dimension):
         rows.append({
             dim_name: row["keys"][0],
             "clicks": row["clicks"],
-            "position": row["position"]
+            "position": math.ceil(float(row["position"] or 0))
         })
 
     df = pd.DataFrame(rows)
@@ -361,7 +413,7 @@ def fetch_data(service, start_date, end_date, dimension):
 
     logger.info(f"GSC rows fetched: {len(df)}")
     logger.info(f"Columns returned: {df.columns.tolist()}")
-
+    logger.debug(f"Data length: {len(df)}, \ncolumns: {df.columns.tolist()}, \nshape: {df.shape}")
     return df
 
 # =========================
@@ -750,7 +802,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
-def format_sheet_headers(sheet_name):
+def format_sheet_headers(sheet_name,local_file=LOCAL_FILE):
     """
     Converts flat headers like:
         urls | 05 April_Rank | 05 April_Traffic | keywords
@@ -764,7 +816,7 @@ def format_sheet_headers(sheet_name):
     """
     logger.info(f"Formatting headers for sheet: {sheet_name}")
 
-    wb = load_workbook(LOCAL_FILE)
+    wb = load_workbook(local_file)
     ws = wb[sheet_name]
 
     if ws.max_row < 1:
@@ -900,7 +952,7 @@ def format_sheet_headers(sheet_name):
 
         ws.column_dimensions[col_letter].width = max_length + 3
 
-    wb.save(LOCAL_FILE)
+    wb.save(local_file)
     wb.close()
 
     logger.info(f"Headers formatted successfully for sheet: {sheet_name}")    
@@ -910,7 +962,7 @@ def format_sheet_headers(sheet_name):
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-def flatten_sheet_headers(sheet_name):
+def flatten_sheet_headers(sheet_name,local_file=LOCAL_FILE):
     """
     Converts 2-row grouped headers like:
         Row 1: urls | 05 April | 05 April
@@ -922,7 +974,8 @@ def flatten_sheet_headers(sheet_name):
     Works directly on LOCAL_FILE (temp.xlsx)
     """
     logger.info(f"Flattening headers for sheet: {sheet_name}")
-    wb = load_workbook(LOCAL_FILE)
+    logger.info(f"Using local file: {local_file}")
+    wb = load_workbook(local_file)
     ws = wb[sheet_name]
 
     # Safety: need at least 2 rows to flatten
@@ -989,7 +1042,7 @@ def flatten_sheet_headers(sheet_name):
 
         ws.column_dimensions[col_letter].width = max_length + 3
 
-    wb.save(LOCAL_FILE)
+    wb.save(local_file)
     wb.close()
 
     logger.info(f"Sheet '{sheet_name}' flattened successfully.")    
@@ -1015,7 +1068,7 @@ def main():
 
         end_date = date.today() - timedelta(days=1)
         start_date = end_date - timedelta(days=6)
-        formatted_date = end_date.strftime("%d %B")
+        formatted_date = start_date.strftime("%d %B")+" - "+end_date.strftime("%d %B")
 
         # df_query = fetch_data(service, start_date, end_date, ["query"])
         # df_page = fetch_data(service, start_date, end_date, ["page"])
@@ -1023,11 +1076,19 @@ def main():
         # logger.info("pages %s", df_page)
 
         sheets_to_update = [
-            "demoSheet",
+            "globalKws",
             "Page sheet",
             # "India",
             "South Africa",
             "South Africa Page",
+            "Brazil",
+            "Brazil Page",
+            "Turkey",
+            "Turkey Page",
+            "Nigeria",
+            "Nigeria Page",
+            "Kenya",
+            "Kenya Page"
         ]
 
         for sheet in sheets_to_update:
